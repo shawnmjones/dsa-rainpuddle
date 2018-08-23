@@ -1,0 +1,99 @@
+#!python
+
+import sys
+import argparse
+import logging
+
+import requests
+
+FORMAT = '%(asctime)s [%(levelname)s] %(name)s: %(message)s'
+logging.basicConfig(format=FORMAT, level=logging.DEBUG)
+
+logger = logging.getLogger(__name__)
+
+def process_arguments(args):
+
+    parser = argparse.ArgumentParser(prog="{}".format(args[0]),
+        description='Generates a summary page consisting of surrogates of mementos using MementoEmbed.',
+        formatter_class=argparse.RawTextHelpFormatter)
+
+    parser.add_argument('-i', '--input', dest='input_filename', type=str,
+        required=True,
+        help='Input file containing a list of URI-Ms in the preferred order')
+
+    parser.add_argument('-o', '--output', dest='output_filename', type=str,
+        required=True,
+        help="Output file containing a summary using the surrogates")
+
+    parser.add_argument('-m', '--mementoembed-service', dest='mementoembed_uri',
+        type=str, default="http://localhost:5550",
+        help='the address of the MementoEmbed service  (e.g., http://localhost:5550)')
+
+    parser.add_argument('-s', '--surrogate', dest='surrogate_type', type=str,
+        default='socialcard', help="Surrogate type, values are 'card' or 'thumbnail'")
+
+    args = parser.parse_args()
+
+    return args
+
+def get_list_of_urims(input_filename):
+
+    urims = []
+
+    with open(input_filename) as f:
+
+        for line in f:
+            line = line.strip()
+
+            urims.append(line)
+
+    return urims
+
+def get_surrogate(urim, service_uri, surrogate_type, session=requests.Session()):
+
+    endpoint = "/".join([service_uri, 'services/product', surrogate_type, urim])
+
+    surrogate = session.get(endpoint)
+
+    return surrogate
+
+def write_summary(urims, urimdata):
+
+    output = ""
+
+    for urim in urims:
+        output += urimdata[urim] + "<br>"
+
+    return "<html><body>{}</body></html>".format(output)
+
+if __name__ == '__main__':
+
+    args = process_arguments(sys.argv)
+
+    logger.info("starting summary visualization production")
+
+    logger.info("input file: {}".format(args.input_filename))
+    logger.info("output file: {}".format(args.input_filename))
+    logger.info("surrogate type: {}".format(args.surrogate_type))
+    logger.info("MementoEmbed URI: {}".format(args.mementoembed_uri))
+
+    session = requests.Session()
+
+    # 1. read data from input file to get list of URI-Ms in order
+    urims = get_list_of_urims(args.input_filename)
+
+    # 2. submit each URI-M to MementoEmbed for a given surrogate
+    urimdata = {}
+
+    for urim in urims:
+        surrogate = get_surrogate(urim, args.mementoembed_uri, 
+            args.surrogate_type, session)
+        urimdata[urim] = surrogate
+
+    # 3. write out HTML
+    summary_output = write_summary(urims, urimdata)
+
+    with open(args.output_file, 'w') as g:
+        g.write(summary_output)
+
+    logger.info("finished summary visualization production")
