@@ -4,8 +4,14 @@ import sys
 import argparse
 import logging
 import base64
+import re
+import os
+import subprocess
+import hashlib
 
 import requests
+
+from bs4 import BeautifulSoup
 
 FORMAT = '%(asctime)s [%(levelname)s] %(name)s: %(message)s'
 logging.basicConfig(format=FORMAT, level=logging.DEBUG)
@@ -54,28 +60,128 @@ def create_data_uri(data, ctype):
 
     return "data:{};base64,{}".format(ctype, str(base64.b64encode(data).decode('utf-8')))
 
+def get_thumbnail_data_uri(urim, service_uri, session=requests.Session()):
+
+    endpoint = "/".join([service_uri, 'services/product', 'thumbnail', urim])
+
+    r = session.get(endpoint, headers={ "Prefer": "timeout=300"})
+
+    data_uri = create_data_uri(r.content, "image/png")
+
+    return data_uri
+
+def get_thumbnail_surrogate(urim, service_uri, session=requests.Session()):
+
+    endpoint = "/".join([service_uri, 'services/product', 'thumbnail', urim])
+
+    r = session.get(endpoint, headers={ "Prefer": "timeout=300"})
+
+    if r.status_code != 200:
+        logger.error("error for URI-M {}, details:\n{}".format(urim, r.text))
+        surrogate = r.text
+    else:
+        data_uri = create_data_uri(r.content, "image/png")
+        surrogate = '<a href="{}"><img src="{}"></a>'.format(urim, data_uri)
+
+    return surrogate
+
+def get_socialcard_surrogate(urim, service_uri, session=requests.Session()):
+
+    endpoint = "/".join([service_uri, 'services/product', 'socialcard', urim])
+
+    r = session.get(endpoint, headers={ "Prefer": "datauri_favicon=yes,datauri_image=yes,using_remote_javascript=no,minify_markup=no" })
+    # TODO: what if response status is not 200
+    surrogate = r.text
+
+    return surrogate
+
+# def convert_socialcard_to_htmlonly(sc_surrogate):
+
+#     os.environ['OUTPUT_FILE'] = '/tmp/outputfile'
+#     os.environ['CARD_DATA'] = sc_surrogate
+    
+#     print(os.getcwd())
+
+#     p = subprocess.Popen(["node", 'dom-manipulation-renameme.js'], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+
+#     try:
+#         p.wait(timeout=300)
+
+#         with open('/tmp/outputfile') as f:
+#             surrogate = f.read()
+
+#             surrogate = surrogate.replace('<script async="" src="//localhost:5000/static/js/mementoembed-v20180806.js" charset="utf-8"></script>', '')
+    
+#     except subprocess.TimeoutExpired:
+#         logger.error("Failed to output a constructed DOM within the timeout")
+#         surrogate = "<strong>Timeout expired</strong><br><br>" + sc_surrogate
+
+#     return surrogate
+
+
 def get_surrogate(urim, service_uri, surrogate_type, session=requests.Session()):
 
     logger.info("acquiring surrogate of type {} for URI-M {}".format(surrogate_type, urim))
 
-    endpoint = "/".join([service_uri, 'services/product', surrogate_type, urim])
-
     if surrogate_type == 'thumbnail':
 
-        r = session.get(endpoint, headers={ "Prefer": "timeout=300"})
-
-        if r.status_code != 200:
-            logger.error("error for URI-M {}, details:\n{}".format(urim, r.text))
-            surrogate = r.text
-        else:
-            data_uri = create_data_uri(r.content, "image/png")
-            surrogate = '<img src="{}">'.format(data_uri)
+        surrogate = '<tr><td>{}</td></tr><tr>\n<td><hr></td></tr>'.format(get_thumbnail_surrogate(urim, service_uri, session=session))
 
     elif surrogate_type == 'socialcard':
 
-        r = session.get(endpoint)
-        # TODO: what if response status is not 200
-        surrogate = r.text
+        surrogate = '<tr><td>{}</td></tr><tr>\n<td><hr></td></tr>'.format(get_socialcard_surrogate(urim, service_uri, session=session))
+
+    elif surrogate_type == 'socialcard+thumbnail':
+
+        sc_surrogate = get_socialcard_surrogate(urim, service_uri, session=session)
+        thumb_surrogate = get_thumbnail_surrogate(urim, service_uri, session=session)
+
+        surrogate = '<tr><td>{}</td><td>{}</td></tr>\n<tr><td colspan="2"><hr></td></tr>'.format(sc_surrogate, thumb_surrogate)
+
+    elif surrogate_type == 'thumbnailcard':
+
+        sc_surrogate = get_socialcard_surrogate(urim, service_uri, session=session)
+        thumb_data = get_thumbnail_data_uri(urim, service_uri, session=requests.Session())
+
+        soup = BeautifulSoup(sc_surrogate, 'html5lib')
+        imgitem = soup.find_all('div', {'class': 'me-image'})
+        try:
+            imgitem[0].find_all('img')[0]['src'] = thumb_data
+        except IndexError as e:
+            logger.exception("failed to find image for URI-M {}".format(urim)) 
+
+        surrogate = str(soup.prettify()).replace('<html>', '').replace('</html>', '').replace('<body>', '').replace("</body>", '')
+        surrogate = '<tr><td>{}</td></tr>\n<tr><td><hr></td></tr>'.format(surrogate)
+
+    elif surrogate_type == 'socialcard+hoverthumb':
+
+        sc_surrogate = get_socialcard_surrogate(urim, service_uri, session=session)
+        thumb_data = get_thumbnail_data_uri(urim, service_uri, session=requests.Session())
+
+        soup = BeautifulSoup(sc_surrogate)
+
+        m = hashlib.sha256()
+        m.update(bytes(thumb_data.encode('utf-8')))
+        thumbid = 't' + m.hexdigest()
+
+        for img in soup.find_all('img'):
+            try:
+                if img['class'] == 'me-favicon':
+                    pass
+            except KeyError:
+                img['onmouseover'] = "showthumb('{}');".format(thumbid)
+                img['onmouseout'] = "hidethumb('{}');".format(thumbid)
+
+                thumbimg = soup.new_tag("img")
+                thumbimg['id'] = thumbid
+                thumbimg['style'] = "visibility: hidden; position: relative; left: 150px;"
+                thumbimg['src'] = thumb_data
+                img.insert_after(thumbimg)
+
+        surrogate = str(soup.prettify()).replace('<html>', '').replace('</html>', '').replace('<body>', '').replace("</body>", '')
+        surrogate = '<tr><td>{}</td></tr>\n<tr><td><hr></td></tr>'.format(surrogate)
+        
+    logger.info("returning surrogate for URI-M {}".format(urim))
 
     return surrogate
 
@@ -84,9 +190,26 @@ def write_summary(urims, urimdata):
     output = ""
 
     for urim in urims:
-        output += urimdata[urim] + "\n<br><hr><br>\n"
+        output += urimdata[urim]
 
-    return "<html><body>{}</body></html>".format(output)
+    return """<html>
+<head>
+<meta content="text/html;charset=utf-8" http-equiv="Content-Type">
+<meta content="utf-8" http-equiv="encoding">
+</head>
+<body>
+<script>
+    function showthumb(thumbid) {
+        thumb = document.getElementById(thumbid);
+        thumb.style.visibility = 'visible';
+    }
+    function hidethumb(thumbid) {
+        document.getElementById(thumbid).style.visibility = 'hidden';
+    }
+</script>
+<table style="border-width: 0px">""" + output + \
+"""</table></body>
+</html>""".format(output)
 
 if __name__ == '__main__':
 
